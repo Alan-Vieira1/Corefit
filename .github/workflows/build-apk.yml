@@ -1,0 +1,176 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Ler versão automaticamente do HTML
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import re, json
+          html_paths = [Path("www/index.html"), Path("index.html")]
+          version = None
+          for p in html_paths:
+              if p.exists():
+                  s = p.read_text(encoding="utf-8", errors="ignore")
+                  m = re.search(r"APP_VERSION\s*=\s*['\"]([^'\"]+)['\"]", s)
+                  if not m:
+                      m = re.search(r"v(\d+\.\d+\.\d+)", s)
+                  if m:
+                      version = m.group(1)
+                      break
+          if not version and Path("package.json").exists():
+              version = json.loads(Path("package.json").read_text(encoding="utf-8")).get("version")
+          if not version:
+              raise SystemExit("Não encontrei a versão. Defina const APP_VERSION='1.0.xx' no www/index.html.")
+          parts = [int(x) for x in version.split(".")]
+          while len(parts) < 3:
+              parts.append(0)
+          version_code = parts[0] * 1000000 + parts[1] * 1000 + parts[2]
+          with open("version.env", "w", encoding="utf-8") as f:
+              f.write(f"APP_VERSION={version}\n")
+              f.write(f"VERSION_CODE={version_code}\n")
+              f.write(f"APK_NAME=corefit-v{version}.apk\n")
+          print(f"APP_VERSION={version}")
+          print(f"VERSION_CODE={version_code}")
+          print(f"APK_NAME=corefit-v{version}.apk")
+          PY
+
+      - name: Exportar versão para o workflow
+        run: cat version.env >> "$GITHUB_ENV"
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Configurar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Instalar dependências
+        run: npm install
+
+      - name: Usar assinatura fixa do APK
+        run: |
+          mkdir -p ~/.android
+          if [ -f "keystores/corefit-debug.keystore" ]; then
+            cp keystores/corefit-debug.keystore ~/.android/debug.keystore
+            chmod 600 ~/.android/debug.keystore
+            echo "Keystore fixa copiada:"
+            ls -l ~/.android/debug.keystore
+          else
+            echo "ATENÇÃO: keystores/corefit-debug.keystore não encontrado."
+          fi
+
+      - name: Criar projeto Android se ainda não existir
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+
+      - name: Sincronizar Capacitor
+        run: npx cap sync android
+
+      - name: Definir permissões, file provider e versão Android
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import os, re
+
+          version_code = os.environ["VERSION_CODE"]
+          version_name = os.environ["APP_VERSION"]
+
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          txt = manifest.read_text(encoding="utf-8")
+
+          perms = [
+              '<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />',
+              '<uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />',
+              '<uses-permission android:name="android.permission.WAKE_LOCK" />',
+              '<uses-permission android:name="android.permission.VIBRATE" />',
+              '<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />',
+              '<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />'
+          ]
+          insert = "\n".join(p for p in perms if p not in txt)
+          if insert:
+              txt = txt.replace("<application", insert + "\n\n    <application", 1)
+          manifest.write_text(txt, encoding="utf-8")
+
+          xml_dir = Path("android/app/src/main/res/xml")
+          xml_dir.mkdir(parents=True, exist_ok=True)
+          (xml_dir / "file_paths.xml").write_text('''<?xml version="1.0" encoding="utf-8"?>
+          <paths xmlns:android="http://schemas.android.com/apk/res/android">
+              <files-path name="files" path="." />
+              <cache-path name="cache" path="." />
+              <external-files-path name="external-files" path="." />
+              <external-cache-path name="external-cache" path="." />
+              <external-path name="external" path="." />
+          </paths>
+          ''', encoding="utf-8")
+
+          files = [Path("android/app/build.gradle"), Path("android/app/build.gradle.kts")]
+          changed = False
+          for p in files:
+              if not p.exists():
+                  continue
+              s = p.read_text(encoding="utf-8")
+              original = s
+              s = re.sub(r'versionCode\s*=\s*\d+', f'versionCode = {version_code}', s)
+              s = re.sub(r'versionCode\s+\d+', f'versionCode {version_code}', s)
+              s = re.sub(r'versionName\s*=\s*"[^"]*"', f'versionName = "{version_name}"', s)
+              s = re.sub(r'versionName\s+"[^"]*"', f'versionName "{version_name}"', s)
+              p.write_text(s, encoding="utf-8")
+              changed = changed or s != original
+              print(f"Arquivo atualizado: {p}")
+              for line in s.splitlines():
+                  if "versionCode" in line or "versionName" in line:
+                      print(line)
+          if not changed:
+              raise SystemExit("Não consegui alterar versionCode/versionName. Verifique o build.gradle.")
+          PY
+
+      - name: Dar permissão ao Gradle
+        run: chmod +x android/gradlew
+
+      - name: Gerar APK debug
+        run: cd android && ./gradlew assembleDebug
+
+      - name: Preparar APK com nome correto
+        run: |
+          mkdir -p release
+          cp android/app/build/outputs/apk/debug/*.apk "release/${APK_NAME}"
+          ls -lh "release/${APK_NAME}"
+
+      - name: Criar ou atualizar GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "v${APP_VERSION}" >/dev/null 2>&1; then
+            gh release upload "v${APP_VERSION}" "release/${APK_NAME}" --clobber
+          else
+            gh release create "v${APP_VERSION}" "release/${APK_NAME}" --title "Corefit v${APP_VERSION}" --notes "APK debug do Corefit v${APP_VERSION}."
+          fi
+
+      - name: Publicar APK para download no Actions
+        uses: actions/upload-artifact@v4
+        with:
+          name: corefit-debug-apk-v${{ env.APP_VERSION }}
+          path: release/${{ env.APK_NAME }}

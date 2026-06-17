@@ -1,0 +1,16 @@
+{
+  "appId": "com.alanvieira.corefitdiario",
+  "appName": "Corefit",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_icon",
+      "iconColor": "#2563eb",
+      "sound": "default"
+    }
+  }
+}
