@@ -18,40 +18,53 @@ jobs:
       - name: Baixar repositório
         uses: actions/checkout@v4
 
-      - name: Ler versão automaticamente do HTML
+      - name: Ler versão automaticamente
+        shell: bash
         run: |
           python3 <<'PY'
           from pathlib import Path
-          import re, json
-          html_paths = [Path("www/index.html"), Path("index.html")]
+          import json
+          import re
+
+          html_paths = [Path('www/index.html'), Path('index.html')]
           version = None
+
           for p in html_paths:
-              if p.exists():
-                  s = p.read_text(encoding="utf-8", errors="ignore")
-                  m = re.search(r"APP_VERSION\s*=\s*['\"]([^'\"]+)['\"]", s)
-                  if not m:
-                      m = re.search(r"v(\d+\.\d+\.\d+)", s)
-                  if m:
-                      version = m.group(1)
-                      break
-          if not version and Path("package.json").exists():
-              version = json.loads(Path("package.json").read_text(encoding="utf-8")).get("version")
+              if not p.exists():
+                  continue
+              s = p.read_text(encoding='utf-8', errors='ignore')
+              m = re.search(r"APP_VERSION\s*=\s*['\"]([^'\"]+)['\"]", s)
+              if not m:
+                  m = re.search(r"v(\d+\.\d+\.\d+)", s)
+              if m:
+                  version = m.group(1)
+                  break
+
+          if not version and Path('package.json').exists():
+              version = json.loads(Path('package.json').read_text(encoding='utf-8')).get('version')
+
           if not version:
-              raise SystemExit("Não encontrei a versão. Defina const APP_VERSION='1.0.xx' no www/index.html.")
-          parts = [int(x) for x in version.split(".")]
+              raise SystemExit("Não encontrei a versão. Defina const APP_VERSION='1.0.x' no www/index.html ou version no package.json.")
+
+          parts = [int(x) for x in version.split('.')]
           while len(parts) < 3:
               parts.append(0)
+
+          # Código alto para não sofrer downgrade em builds antigas.
           version_code = 2000000 + parts[0] * 1000000 + parts[1] * 1000 + parts[2]
-          with open("version.env", "w", encoding="utf-8") as f:
-              f.write(f"APP_VERSION={version}\n")
-              f.write(f"VERSION_CODE={version_code}\n")
-              f.write(f"APK_NAME=corefit-v{version}.apk\n")
-          print(f"APP_VERSION={version}")
-          print(f"VERSION_CODE={version_code}")
-          print(f"APK_NAME=corefit-v{version}.apk")
+
+          with open('version.env', 'w', encoding='utf-8') as f:
+              f.write(f'APP_VERSION={version}\n')
+              f.write(f'VERSION_CODE={version_code}\n')
+              f.write(f'APK_NAME=corefit-v{version}.apk\n')
+
+          print(f'APP_VERSION={version}')
+          print(f'VERSION_CODE={version_code}')
+          print(f'APK_NAME=corefit-v{version}.apk')
           PY
 
       - name: Exportar versão para o workflow
+        shell: bash
         run: cat version.env >> "$GITHUB_ENV"
 
       - name: Configurar Node.js
@@ -69,18 +82,21 @@ jobs:
         run: npm install
 
       - name: Usar assinatura fixa do APK
+        shell: bash
         run: |
           mkdir -p ~/.android
           if [ -f "keystores/corefit-debug.keystore" ]; then
             cp keystores/corefit-debug.keystore ~/.android/debug.keystore
             chmod 600 ~/.android/debug.keystore
-            echo "Keystore fixa copiada:"
+            echo "Keystore fixa copiada para ~/.android/debug.keystore"
             ls -l ~/.android/debug.keystore
           else
-            echo "ATENÇÃO: keystores/corefit-debug.keystore não encontrado."
+            echo "ERRO: keystores/corefit-debug.keystore não encontrado."
+            exit 1
           fi
 
       - name: Criar projeto Android se ainda não existir
+        shell: bash
         run: |
           if [ ! -d "android" ]; then
             npx cap add android
@@ -89,17 +105,14 @@ jobs:
       - name: Sincronizar Capacitor
         run: npx cap sync android
 
-      - name: Definir permissões, file provider e versão Android
+      - name: Definir permissões Android
+        shell: bash
         run: |
           python3 <<'PY'
           from pathlib import Path
-          import os, re
 
-          version_code = os.environ["VERSION_CODE"]
-          version_name = os.environ["APP_VERSION"]
-
-          manifest = Path("android/app/src/main/AndroidManifest.xml")
-          txt = manifest.read_text(encoding="utf-8")
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          txt = manifest.read_text(encoding='utf-8')
 
           perms = [
               '<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />',
@@ -109,14 +122,21 @@ jobs:
               '<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />',
               '<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />'
           ]
-          insert = "\n".join(p for p in perms if p not in txt)
-          if insert:
-              txt = txt.replace("<application", insert + "\n\n    <application", 1)
-          manifest.write_text(txt, encoding="utf-8")
 
-          xml_dir = Path("android/app/src/main/res/xml")
-          xml_dir.mkdir(parents=True, exist_ok=True)
-          (xml_dir / "file_paths.xml").write_text('''<?xml version="1.0" encoding="utf-8"?>
+          insert = '\n'.join(p for p in perms if p not in txt)
+          if insert:
+              txt = txt.replace('<application', insert + '\n\n    <application', 1)
+
+          manifest.write_text(txt, encoding='utf-8')
+          print('Permissões conferidas no AndroidManifest.xml')
+          PY
+
+      - name: Criar file_paths.xml
+        shell: bash
+        run: |
+          mkdir -p android/app/src/main/res/xml
+          cat > android/app/src/main/res/xml/file_paths.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
           <paths xmlns:android="http://schemas.android.com/apk/res/android">
               <files-path name="files" path="." />
               <cache-path name="cache" path="." />
@@ -124,50 +144,77 @@ jobs:
               <external-cache-path name="external-cache" path="." />
               <external-path name="external" path="." />
           </paths>
-          ''', encoding="utf-8")
+          EOF
 
-          files = [Path("android/app/build.gradle"), Path("android/app/build.gradle.kts")]
-          changed = False
+      - name: Definir versionCode e versionName
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          version_code = os.environ['VERSION_CODE']
+          version_name = os.environ['APP_VERSION']
+          files = [Path('android/app/build.gradle'), Path('android/app/build.gradle.kts')]
+          changed_any = False
+
           for p in files:
               if not p.exists():
                   continue
-              s = p.read_text(encoding="utf-8")
+
+              s = p.read_text(encoding='utf-8')
               original = s
-              s = re.sub(r'versionCode\s*=\s*\d+', f'versionCode = {version_code}', s)
+
+              # Groovy: versionCode 1 / versionName "1.0"
               s = re.sub(r'versionCode\s+\d+', f'versionCode {version_code}', s)
-              s = re.sub(r'versionName\s*=\s*"[^"]*"', f'versionName = "{version_name}"', s)
               s = re.sub(r'versionName\s+"[^"]*"', f'versionName "{version_name}"', s)
-              p.write_text(s, encoding="utf-8")
-              changed = changed or s != original
-              print(f"Arquivo atualizado: {p}")
+
+              # Kotlin DSL: versionCode = 1 / versionName = "1.0"
+              s = re.sub(r'versionCode\s*=\s*\d+', f'versionCode = {version_code}', s)
+              s = re.sub(r'versionName\s*=\s*"[^"]*"', f'versionName = "{version_name}"', s)
+
+              p.write_text(s, encoding='utf-8')
+              changed = s != original
+              changed_any = changed_any or changed
+              print(f'Arquivo conferido: {p}')
               for line in s.splitlines():
-                  if "versionCode" in line or "versionName" in line:
+                  if 'versionCode' in line or 'versionName' in line:
                       print(line)
-          # Força assinatura fixa no Gradle. Copiar para ~/.android ajuda, mas isto garante que
-          # o APK debug use sempre keystores/corefit-debug.keystore no GitHub Actions.
-          gradle = Path("android/app/build.gradle")
-          if gradle.exists():
-              gs = gradle.read_text(encoding="utf-8")
-              if "corefit-debug.keystore" not in gs:
-                  if "android {" in gs:
-                      gs = gs.replace("android {", """android {
-    signingConfigs {
-        debug {
-            storeFile file('../../keystores/corefit-debug.keystore')
-            storePassword 'android'
-            keyAlias 'androiddebugkey'
-            keyPassword 'android'
-        }
-    }
-""", 1)
-                  if "buildTypes {" in gs and "signingConfig signingConfigs.debug" not in gs:
-                      gs = gs.replace("debug {", "debug {\n            signingConfig signingConfigs.debug", 1)
-                      gs = gs.replace("release {", "release {\n            signingConfig signingConfigs.debug", 1)
-                  gradle.write_text(gs, encoding="utf-8")
-                  print("Assinatura fixa injetada em android/app/build.gradle")
-          if not changed:
-              raise SystemExit("Não consegui alterar versionCode/versionName. Verifique o build.gradle.")
+
+          if not changed_any:
+              raise SystemExit('Não consegui alterar versionCode/versionName. Verifique android/app/build.gradle.')
           PY
+
+      - name: Forçar assinatura fixa no Gradle
+        shell: bash
+        run: |
+          if ! grep -q "corefit-debug.keystore" android/app/build.gradle; then
+            cat >> android/app/build.gradle <<'EOF'
+
+          // CoreFit: assinatura fixa para manter atualizações consistentes no GitHub Actions.
+          android {
+              signingConfigs {
+                  corefitDebug {
+                      storeFile file('../../keystores/corefit-debug.keystore')
+                      storePassword 'android'
+                      keyAlias 'androiddebugkey'
+                      keyPassword 'android'
+                  }
+              }
+              buildTypes {
+                  debug {
+                      signingConfig signingConfigs.corefitDebug
+                  }
+                  release {
+                      signingConfig signingConfigs.corefitDebug
+                  }
+              }
+          }
+          EOF
+          fi
+          echo "Assinatura fixa conferida no android/app/build.gradle"
+          grep -n "corefit-debug.keystore\|signingConfig" android/app/build.gradle || true
 
       - name: Dar permissão ao Gradle
         run: chmod +x android/gradlew
@@ -176,6 +223,7 @@ jobs:
         run: cd android && ./gradlew assembleDebug
 
       - name: Preparar APK com nome correto
+        shell: bash
         run: |
           mkdir -p release
           cp android/app/build/outputs/apk/debug/*.apk "release/${APK_NAME}"
@@ -184,6 +232,7 @@ jobs:
       - name: Criar ou atualizar GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
           if gh release view "v${APP_VERSION}" >/dev/null 2>&1; then
             gh release upload "v${APP_VERSION}" "release/${APK_NAME}" --clobber
