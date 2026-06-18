@@ -1,6 +1,6 @@
 {
-  "name": "corefit",
-  "version": "1.0.1",
+  "name": "corefit-android",
+  "version": "1.0.2",
   "private": true,
   "description": "Corefit - receita diária de whey com psyllium, assistente diário e cálculo calibrável",
   "scripts": {
